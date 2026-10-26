@@ -1,0 +1,24 @@
+name: test
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests -v
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: valid example passes
+        uses: ./
+        with:
+          files: examples/*.xml
+      - name: broken example fails
+        id: broken
+        continue-on-error: true
+        uses: ./
+        with:
+          files: tests/broken-totals.xml
+      - name: expect failure
+        run: test "${{ steps.broken.outcome }}" = "failure"

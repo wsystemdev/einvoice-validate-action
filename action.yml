@@ -1,0 +1,46 @@
+name: "EU e-invoice validator (EN 16931, XRechnung)"
+description: "Validate UBL, CII and ZUGFeRD/Factur-X invoices against the official EN 16931 and XRechnung rules in CI."
+author: "W System"
+branding:
+  icon: "check-square"
+  color: "blue"
+inputs:
+  files:
+    description: "Glob(s) of invoice files to check, one per line or comma-separated (XML or ZUGFeRD/Factur-X PDF)."
+    required: false
+    default: "**/*.xml"
+  rules:
+    description: "auto | en16931 | xrechnung"
+    required: false
+    default: "auto"
+  api-key:
+    description: "Optional W System API key (free key: 500 units a month, no card). Without one, each runner IP gets 20 free calls a day."
+    required: false
+    default: ""
+  fail-on-warnings:
+    description: "Fail the step when an invoice has warnings (default: only errors fail)."
+    required: false
+    default: "false"
+  api-url:
+    description: "API base URL."
+    required: false
+    default: "https://api.wsystem.dev"
+outputs:
+  checked:
+    description: "Number of files checked."
+    value: ${{ steps.validate.outputs.checked }}
+  failed:
+    description: "Number of files that failed or could not be checked."
+    value: ${{ steps.validate.outputs.failed }}
+runs:
+  using: "composite"
+  steps:
+    - id: validate
+      shell: bash
+      env:
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_RULES: ${{ inputs.rules }}
+        INPUT_API_KEY: ${{ inputs.api-key }}
+        INPUT_FAIL_ON_WARNINGS: ${{ inputs.fail-on-warnings }}
+        INPUT_API_URL: ${{ inputs.api-url }}
+      run: python3 "${{ github.action_path }}/validate.py"
