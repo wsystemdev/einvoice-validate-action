@@ -1,5 +1,5 @@
-name: "W System E-Invoice Validator"
-description: "Validate UBL, CII, XRechnung and ZUGFeRD/Factur-X invoices offline against EN 16931 and XRechnung rules in CI."
+name: "EU e-invoice validator (EN 16931, XRechnung)"
+description: "Validate UBL, CII, XRechnung and ZUGFeRD/Factur-X invoices against the official EN 16931 and XRechnung rules in CI (API mode default for v1 compatibility; mode: local for 100% offline container validation)."
 author: "W System"
 branding:
   icon: "check-square"
@@ -21,34 +21,38 @@ inputs:
     description: "Optional alias for 'rules' (auto | en16931 | xrechnung)."
     required: false
     default: ""
+  mode:
+    description: "Execution mode: api (default when omitted, v1-compatible hosted W System API) or local (opt-in 100% offline Docker container with --network none; falls back to pinned pip package if GHCR/Docker is unavailable), docker (strict Docker only), pip (offline Python package)."
+    required: false
+    default: ""
+  engine:
+    description: "Optional alias for 'mode' (api | local | docker | pip)."
+    required: false
+    default: ""
   fail-on:
     description: "When to fail the step: error | warning | none."
     required: false
     default: "error"
   fail-on-warnings:
-    description: "Deprecated alias for fail-on: warning (true | false)."
+    description: "Fail the step when an invoice has warnings (v1 compatibility alias for fail-on: warning)."
     required: false
     default: "false"
   license-key:
-    description: "Optional W System Validator commercial licence key (WSV1...) for commercial rule packs and pro features (passed via env file, never logged)."
+    description: "Optional W System Validator commercial licence key (WSV1...) for commercial rule packs and pro features in local/docker mode (passed via env file, never logged)."
     required: false
     default: ""
   rule-pack:
     description: "Optional rule pack ID (for example 2026.11.1) when using a commercial validator image."
     required: false
     default: ""
-  engine:
-    description: "Validation engine: local (offline Docker container with --network none; falls back to pinned pip package if Docker/GHCR unavailable), docker (strict Docker only), pip (offline Python package), or api (hosted W System API)."
-    required: false
-    default: "local"
   image:
-    description: "Pinned container image used when engine is 'local' or 'docker'."
+    description: "Pinned container image used when mode is 'local' or 'docker'."
     required: false
     default: "ghcr.io/wsystemdev/einvoice-validator:0.1.0-beta.2"
   report-format:
-    description: "Report file(s) to write: both | sarif | json | none."
+    description: "Report file(s) to write: both | sarif | json | none (defaults to 'none' in api mode unless set, 'both' in local/docker/pip mode)."
     required: false
-    default: "both"
+    default: ""
   json-report:
     description: "Output path for the JSON validation report."
     required: false
@@ -62,11 +66,11 @@ inputs:
     required: false
     default: "false"
   api-key:
-    description: "Optional W System API key when engine is 'api'."
+    description: "Optional W System API key (free key: 500 units a month, no card) when mode is 'api'. Without one, each runner IP gets 20 free calls a day."
     required: false
     default: ""
   api-url:
-    description: "W System API base URL when engine is 'api'."
+    description: "API base URL when mode is 'api'."
     required: false
     default: "https://api.wsystem.dev"
 outputs:
@@ -74,10 +78,10 @@ outputs:
     description: "Number of files checked."
     value: ${{ steps.validate.outputs.checked }}
   failed:
-    description: "Number of files that failed according to fail-on."
+    description: "Number of files that failed or could not be checked."
     value: ${{ steps.validate.outputs.failed }}
   valid:
-    description: "'true' if failed == 0, otherwise 'false'."
+    description: "'true' if failed == 0 (or fail-on == 'none'), otherwise 'false'."
     value: ${{ steps.validate.outputs.valid }}
   json-report:
     description: "Path to the JSON report file if written."
@@ -98,11 +102,12 @@ runs:
         INPUT_PATHS: ${{ inputs.paths }}
         INPUT_RULES: ${{ inputs.rules }}
         INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_ENGINE: ${{ inputs.engine }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_FAIL_ON_WARNINGS: ${{ inputs.fail-on-warnings }}
         INPUT_LICENSE_KEY: ${{ inputs.license-key }}
         INPUT_RULE_PACK: ${{ inputs.rule-pack }}
-        INPUT_ENGINE: ${{ inputs.engine }}
         INPUT_IMAGE: ${{ inputs.image }}
         INPUT_REPORT_FORMAT: ${{ inputs.report-format }}
         INPUT_JSON_REPORT: ${{ inputs.json-report }}

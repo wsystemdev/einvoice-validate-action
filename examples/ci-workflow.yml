@@ -18,8 +18,9 @@ jobs:
 
       - name: Validate e-invoices offline
         id: einvoice
-        uses: wsystemdev/einvoice-validate-action@v0
+        uses: wsystemdev/einvoice-validate-action@v1.1.0
         with:
+          mode: local
           files: |
             invoices/**/*.xml
             invoices/**/*.pdf

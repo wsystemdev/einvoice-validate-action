@@ -87,7 +87,55 @@ class TestValidateAction(unittest.TestCase):
         os.environ.update(self.orig_env)
         shutil.rmtree(self.d, ignore_errors=True)
 
-    def test_local_default_offline_docker_and_reports(self):
+    def test_v1_api_default_regression(self):
+        """Existing @v1 workflows (no mode/engine/report-format set) behave identically: API mode default, no Docker, no extra report files."""
+        def forbid_docker(*a, **k):
+            raise AssertionError("subprocess/Docker must not be called in default @v1 API mode")
+
+        seen = []
+        sum_p = os.path.join(self.d, "sum.md")
+        out_p = os.path.join(self.d, "out")
+        os.environ["GITHUB_STEP_SUMMARY"] = sum_p
+        os.environ["GITHUB_OUTPUT"] = out_p
+        os.environ["INPUT_RULES"] = "auto"
+        os.environ["INPUT_API_URL"] = "https://api.wsystem.dev"
+
+        # 1. Valid pass with no API key
+        out1 = io.StringIO()
+        code1, _ = v.run(
+            opener=opener_for({"valid": True, "errors": [], "warnings": [], "profile": "XRechnung"}, seen=seen),
+            runner=forbid_docker,
+            out=out1,
+        )
+        self.assertEqual(code1, 0)
+        self.assertEqual(seen[0].full_url, "https://api.wsystem.dev/einvoice/validate?rules=auto")
+        self.assertIsNone(seen[0].get_header("X-api-key"))
+        self.assertEqual(seen[0].get_header("Content-type"), "application/xml")
+        self.assertIn("XRechnung", pathlib.Path(sum_p).read_text())
+        self.assertIn("checked=1\nfailed=0\n", pathlib.Path(out_p).read_text())
+        # No unexpected SARIF/JSON files written in default v1 API mode
+        self.assertFalse((pathlib.Path(self.d) / "wsystem-einvoice-report.json").exists())
+        self.assertFalse((pathlib.Path(self.d) / "wsystem-einvoice-report.sarif").exists())
+
+        # 2. Invalid invoice emits v1 annotation and exits 1
+        out2 = io.StringIO()
+        p_err = {
+            "valid": False,
+            "errors": [{"rule_id": "BR-CO-16", "message": "Amount due", "business_terms": ["BT-115"], "fix": "Fix it"}],
+            "warnings": [],
+        }
+        code2, _ = v.run(opener=opener_for(p_err), runner=forbid_docker, out=out2)
+        self.assertEqual(code2, 1)
+        self.assertIn("::error file=invoices/a.xml,title=BR-CO-16::BR-CO-16: Amount due [BT-115] Fix: Fix it", out2.getvalue())
+
+        # 3. Warnings only fail with INPUT_FAIL_ON_WARNINGS=true
+        p_warn = {"valid": True, "errors": [], "warnings": [{"rule_id": "W1", "message": "m"}]}
+        self.assertEqual(v.run(opener=opener_for(p_warn), runner=forbid_docker, out=io.StringIO())[0], 0)
+        os.environ["INPUT_FAIL_ON_WARNINGS"] = "true"
+        self.assertEqual(v.run(opener=opener_for(p_warn), runner=forbid_docker, out=io.StringIO())[0], 1)
+
+    def test_local_offline_docker_and_reports(self):
+        os.environ["INPUT_MODE"] = "local"
         seen = []
         payload = {
             "validator": {"name": "W System e-invoice validator", "edition": "free", "version": "0.1.0"},
@@ -144,6 +192,7 @@ class TestValidateAction(unittest.TestCase):
         self.assertIn("XRechnung", pathlib.Path(sum_p).read_text())
 
     def test_paths_profile_annotations_and_sarif_lines(self):
+        os.environ["INPUT_MODE"] = "local"
         pdf = self.inv_dir / "b.pdf"
         pdf.write_bytes(b"%PDF-1.7 test")
         os.environ.pop("INPUT_FILES", None)
@@ -203,6 +252,7 @@ class TestValidateAction(unittest.TestCase):
         self.assertNotIn("region", results[1]["locations"][0]["physicalLocation"])
 
     def test_fail_on_modes(self):
+        os.environ["INPUT_MODE"] = "local"
         payload_warn = {
             "rule_pack": "2026.11.1",
             "files": [
@@ -251,6 +301,7 @@ class TestValidateAction(unittest.TestCase):
         self.assertIn("valid=true", gh_out)
 
     def test_license_key_env_file_not_leaked_and_cleaned(self):
+        os.environ["INPUT_MODE"] = "local"
         secret = "WSV1.eyJwbGFuIjoidGVhbSJ9.TOP_SECRET_SIG_XYZ"
         os.environ["INPUT_LICENSE_KEY"] = secret
         os.environ["INPUT_IMAGE"] = "ghcr.io/wsystemdev/einvoice-validator-pro:0.1.0-beta.1"
@@ -275,7 +326,7 @@ class TestValidateAction(unittest.TestCase):
         self.assertNotIn(secret, (pathlib.Path(self.d) / "wsystem-einvoice-report.sarif").read_text())
 
     def test_local_falls_back_to_pip_when_ghcr_unauthorized_while_docker_mode_strict(self):
-        # Pre-populate cached venv/rules layout to simulate pip fallback cleanly
+        os.environ["INPUT_MODE"] = "local"
         cache = pathlib.Path(self.d) / "wsv-offline-v0.1.0-beta.2"
         py_bin = cache / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         py_bin.parent.mkdir(parents=True)
@@ -302,14 +353,15 @@ class TestValidateAction(unittest.TestCase):
         self.assertEqual(calls[1][0][0], str(py_bin))
         self.assertEqual(calls[1][1]["WSV_RULES_DIR"], str(cache / "rules"))
 
-        # Strict engine=docker does not fall back
-        os.environ["INPUT_ENGINE"] = "docker"
+        # Strict mode=docker does not fall back
+        os.environ["INPUT_MODE"] = "docker"
         out2 = io.StringIO()
         code2, _ = v.run(runner=fallback_runner, out=out2)
         self.assertEqual(code2, 1)
         self.assertIn("unauthorized", out2.getvalue())
 
     def test_input_error_and_docker_failure(self):
+        os.environ["INPUT_MODE"] = "local"
         payload = {
             "rule_pack": "2026.11.1",
             "files": [{"file": "invoices/a.xml", "valid": False, "input_error": "not an e-invoice XML", "errors": [], "warnings": []}],
@@ -321,7 +373,7 @@ class TestValidateAction(unittest.TestCase):
         sarif = json.loads((pathlib.Path(self.d) / "wsystem-einvoice-report.sarif").read_text())
         self.assertEqual(sarif["runs"][0]["results"][0]["ruleId"], "INPUT_ERROR")
 
-        os.environ["INPUT_ENGINE"] = "docker"
+        os.environ["INPUT_MODE"] = "docker"
 
         def fail_docker(*a, **k):
             return MockProc(returncode=125, stdout="", stderr="pull access denied")
@@ -344,6 +396,7 @@ class TestValidateAction(unittest.TestCase):
         self.assertEqual(v.run(out=io.StringIO())[0], 2)
 
     def test_report_format_options(self):
+        os.environ["INPUT_MODE"] = "local"
         payload = {"rule_pack": "2026.11.1", "files": [{"file": "invoices/a.xml", "valid": True, "errors": [], "warnings": []}]}
         os.environ["INPUT_REPORT_FORMAT"] = "sarif"
         os.environ["INPUT_SARIF_REPORT"] = "out/custom.sarif"

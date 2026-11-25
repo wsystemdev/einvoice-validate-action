@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 
-UA = "wsystem-einvoice-validate-action/0.1"
+UA = "wsystem-einvoice-validate-action/1.1"
 DEFAULT_TAG = "0.1.0-beta.2"
 DEFAULT_IMAGE = f"ghcr.io/wsystemdev/einvoice-validator:{DEFAULT_TAG}"
 DEFAULT_REPO_URL = "https://github.com/wsystemdev/einvoice-validator"
@@ -623,11 +623,12 @@ def run(
     if env("INPUT_FAIL_ON_WARNINGS", "false").lower() == "true" and fail_on == "error":
         fail_on = "warning"
 
-    engine = (env("INPUT_ENGINE") or "local").lower()
+    engine = (env("INPUT_MODE") or env("INPUT_ENGINE") or "api").lower()
     image = env("INPUT_IMAGE") or DEFAULT_IMAGE
     license_key = env("INPUT_LICENSE_KEY") or env("INPUT_LICENCE_KEY")
     rule_pack = env("INPUT_RULE_PACK")
-    report_format = (env("INPUT_REPORT_FORMAT") or "both").lower()
+    default_rf = "none" if engine == "api" else "both"
+    report_format = (env("INPUT_REPORT_FORMAT") or default_rf).lower()
     json_report_path = env("INPUT_JSON_REPORT", "wsystem-einvoice-report.json")
     sarif_report_path = env("INPUT_SARIF_REPORT", "wsystem-einvoice-report.sarif")
     fail_on_empty = env("INPUT_FAIL_ON_EMPTY", "false").lower() == "true"

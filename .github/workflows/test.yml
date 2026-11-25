@@ -18,10 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Valid fixtures pass offline (UBL, CII, XRechnung, Factur-X PDF)
+      - name: Valid fixtures pass offline (mode=local; UBL, CII, XRechnung, Factur-X PDF)
         id: valid
         uses: ./
         with:
+          mode: local
           files: |
             tests/fixtures/valid/*.xml
             tests/fixtures/valid/*.pdf
@@ -43,11 +44,12 @@ jobs:
           assert s["version"] == "2.1.0"
           PY
 
-      - name: Valid fixture with warning fails under fail-on=warning
+      - name: Valid fixture with warning fails under fail-on=warning (mode=local)
         id: warn_fail
         continue-on-error: true
         uses: ./
         with:
+          mode: local
           files: tests/fixtures/valid/KoSIT_01.01a-INVOICE_ubl.xml
           fail-on: warning
           report-format: none
@@ -55,11 +57,12 @@ jobs:
       - name: Expect warning failure
         run: test "${{ steps.warn_fail.outputs.failed }}" = "1" -a "${{ steps.warn_fail.outcome }}" = "failure"
 
-      - name: Invalid fixtures fail offline (XML + Factur-X PDF + non-invoice)
+      - name: Invalid fixtures fail offline (mode=local; XML + Factur-X PDF + non-invoice)
         id: invalid
         continue-on-error: true
         uses: ./
         with:
+          mode: local
           files: |
             tests/fixtures/invalid/*.xml
             tests/fixtures/invalid/*.pdf
@@ -81,13 +84,29 @@ jobs:
               assert expected in rule_ids, (expected, rule_ids)
           PY
 
-      - name: fail-on=none exits 0 even on invalid fixtures
+      - name: fail-on=none exits 0 even on invalid fixtures (mode=local)
         id: warn_only
         uses: ./
         with:
+          mode: local
           files: tests/fixtures/invalid/ubl-xrechnung-BR-CO-16-totals.xml
           fail-on: none
           report-format: none
 
       - name: Verify fail-on=none output
         run: test "${{ steps.warn_only.outputs.failed }}" = "1" -a "${{ steps.warn_only.outputs.valid }}" = "true"
+
+      - name: v1 default API mode passes on valid example
+        uses: ./
+        with:
+          files: examples/*.xml
+
+      - name: v1 default API mode fails on broken totals
+        id: api_broken
+        continue-on-error: true
+        uses: ./
+        with:
+          files: tests/broken-totals.xml
+
+      - name: Expect v1 API failure
+        run: test "${{ steps.api_broken.outcome }}" = "failure"
