@@ -1,0 +1,23 @@
+W System e-invoice validation GitHub Action
+Copyright 2026 W System
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository includes Apache-2.0 sample invoice fixtures for testing:
+- KoSIT XRechnung test suite samples (tests/fixtures/valid/KoSIT_*):
+  (c) Koordinierungsstelle fuer IT-Standards (KoSIT), Apache-2.0
+  https://github.com/itplr-kosit/xrechnung-testsuite
+- Mustang project ZUGFeRD / Factur-X sample PDFs (tests/fixtures/*_fx.pdf):
+  (c) Mustangproject contributors, Apache-2.0
+  https://github.com/ZUGFeRD/mustangproject
+- W System valid and modified invalid sample fixtures.
+
+In default offline mode (`engine: local`), this action invokes the container
+image `ghcr.io/wsystemdev/einvoice-validator` (`--network none`), which bundles
+third-party validation artefacts under their own licences (CEN/TC 434 EN 16931
+under EUPL-1.2 unmodified, KoSIT XRechnung configuration under Apache-2.0,
+Saxon-HE under MPL-2.0). See `docker run --rm ghcr.io/wsystemdev/einvoice-validator:0.1 licenses`.
+
+Peppol BIS Billing 3.0 specific rules are not included.
+Disclaimer: this is a technical check against official rule sets. A technically
+valid file is not tax or legal advice.

@@ -1,58 +1,104 @@
-# EU e-invoice validator for GitHub Actions (EN 16931, XRechnung)
+# EU E-Invoice Validator for GitHub Actions (W System)
 
-Catch broken e-invoices before they reach a customer: this action checks the UBL, CII and ZUGFeRD/Factur-X files your code generates against the official CEN EN 16931 Schematron rules, plus the KoSIT XRechnung 3.0 rules for XRechnung files, and fails the build with the rule ID, business terms (BT-…) and a fix hint as inline annotations.
+Validate **UBL 2.1**, **UN/CEFACT CII**, **XRechnung 3.0**, and **ZUGFeRD / Factur-X PDF** invoices against the official **CEN EN 16931** and **KoSIT XRechnung** rule sets in CI — **100% offline**.
 
-Useful if you generate invoices for Germany (B2B e-invoicing since 2025), Belgium (Peppol since 2026), France (2026–2027), Poland, Spain or Slovakia (2027) and want a regression test on your invoice templates.
+In default `local` mode, the validator container runs with `--network none` and baked, checksum-verified rules. No API key is needed and **no invoice data ever leaves your runner**.
+
+## Quickstart
 
 ```yaml
 name: e-invoices
 on: [push, pull_request]
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # generate your test invoices here, e.g. `make invoices`
-      - uses: wsystemdev/einvoice-validate-action@v1
+
+      - name: Validate e-invoices offline
+        uses: wsystemdev/einvoice-validate-action@v2
         with:
           files: |
-            build/invoices/**/*.xml
-            build/invoices/**/*.pdf
-          # api-key: ${{ secrets.WSYSTEM_API_KEY }}   # optional, see below
+            invoices/**/*.xml
+            invoices/**/*.pdf
 ```
 
-A failing invoice shows up like this:
+See [`examples/ci-workflow.yml`](examples/ci-workflow.yml) for a full workflow uploading SARIF results to GitHub Code Scanning and saving the JSON report as a workflow artifact.
 
-```
-Error: BR-CO-16: Amount due for payment (BT-115) = Invoice total amount with VAT (BT-112) -Paid amount (BT-113) +Rounding amount (BT-114). [BT-112, BT-113, BT-114, BT-115] Fix: Amount due must be total with VAT minus prepaid amount plus rounding.
-```
+## Outputs & CI integration
 
-and the job summary gets a table with one row per file (result, error and warning counts, detected profile).
+- **Per-file GitHub annotations:** inline `::error` and `::warning` annotations with rule ID, line number (for XML), business terms (`BT-...`), and a plain-English fix hint.
+- **Job summary table:** Markdown summary appended to `$GITHUB_STEP_SUMMARY` showing file, status, detected profile, syntax, error/warning counts, and first issue.
+- **SARIF 2.1.0 report:** written to `wsystem-einvoice-report.sarif` by default for `github/codeql-action/upload-sarif`.
+- **JSON report:** written to `wsystem-einvoice-report.json` by default with full machine-readable results.
+- **Exit code:** `0` when all files pass according to `fail-on`, `1` when any file fails (or validator invocation fails), `2` on invalid action inputs.
+
+Example annotation:
+
+```text
+Error: BR-CO-16: Amount due for payment (BT-115) = Invoice total amount with VAT (BT-112) - Paid amount (BT-113) + Rounding amount (BT-114). [BT-112, BT-113, BT-114, BT-115] Fix: Amount due must be total with VAT minus prepaid amount plus rounding.
+```
 
 ## Inputs
 
-| input | default | what it does |
+| Input | Default | Description |
 |---|---|---|
-| `files` | `**/*.xml` | Globs of files to check, one per line or comma-separated. XML (UBL Invoice/CreditNote, CII) or ZUGFeRD/Factur-X PDF. |
-| `rules` | `auto` | `auto` picks XRechnung rules for XRechnung files and EN 16931 otherwise; force with `en16931` or `xrechnung`. |
-| `api-key` | none | Optional API key, sent as `X-API-Key`. |
-| `fail-on-warnings` | `false` | Also fail on warnings (for example the Slovak eFaktúra field checks). |
-| `api-url` | `https://api.wsystem.dev` | API base URL. |
+| `files` | `""` | Globs, file paths, or directories (newline or comma-separated). Defaults to `**/*.xml` if both `files` and `paths` are empty. |
+| `paths` | `""` | Alias for `files`. |
+| `rules` | `auto` | Validation profile: `auto` (detects XRechnung vs EN 16931), `en16931`, or `xrechnung`. |
+| `profile` | `""` | Optional alias for `rules`. |
+| `fail-on` | `error` | Fail the step on `error`, `warning`, or `none`. |
+| `fail-on-warnings` | `false` | Deprecated boolean alias (`true` acts like `fail-on: warning`). |
+| `license-key` | `""` | Optional W System Validator commercial licence key (`WSV1...`) for commercial rule packs and pro features. Passed via an ephemeral `0600` env file and never printed. |
+| `rule-pack` | `""` | Optional rule pack ID (for example `2026.11.1`) when using the commercial validator image. |
+| `engine` | `local` | `local` (offline Docker container with `--network none`) or `api` (hosted W System API for non-Docker runners). |
+| `image` | `ghcr.io/wsystemdev/einvoice-validator:0.1` | Container image used when `engine` is `local`. |
+| `report-format` | `both` | Reports to write: `both`, `sarif`, `json`, or `none`. |
+| `sarif-report` | `wsystem-einvoice-report.sarif` | Output path for the SARIF 2.1.0 report. |
+| `json-report` | `wsystem-einvoice-report.json` | Output path for the JSON report. |
+| `fail-on-empty` | `false` | Fail with exit code `2` if no files match `files`/`paths`. |
+| `api-key` | `""` | Optional W System API key (only used when `engine: api`). |
+| `api-url` | `https://api.wsystem.dev` | API base URL (only used when `engine: api`). |
 
-Outputs: `checked` (files checked) and `failed` (files that failed or could not be checked).
+## Outputs
 
-## Free use and API keys
+| Output | Description |
+|---|---|
+| `checked` | Number of files checked. |
+| `failed` | Number of files that failed according to `fail-on`. |
+| `valid` | `'true'` if `failed == 0`, otherwise `'false'`. |
+| `json-report` | Path to the generated JSON report (empty if disabled). |
+| `sarif-report` | Path to the generated SARIF 2.1.0 report (empty if disabled). |
+| `rule-pack` | Rule pack version used by the validator. |
 
-Without a key, each IP address gets 20 free calls a day. GitHub-hosted runners share IP addresses, so for regular CI use get a [free API key](https://api.wsystem.dev/account/free-key) (500 units a month, no card) and store it as a repository secret. Paid plans are on the [pricing page](https://wsystem.dev/pricing).
+## Commercial rule packs & self-hosted validator
 
-## What it does not check
+The default free container (`ghcr.io/wsystemdev/einvoice-validator`) validates UBL, CII, XRechnung 3.0, and XML extracted from ZUGFeRD/Factur-X PDFs offline with zero keys required.
 
-Peppol BIS 3 specific rules (`PEPPOL-EN16931-*`) and the French XP Z12-012 rules are not checked yet. A technically valid file is not tax or legal advice.
+Teams needing signed rule-pack updates between image releases, multiple rule versions side by side, PDF/A-3 container checks, or a local validation HTTP server can use the commercial W System self-hosted validator image with `license-key` stored as a GitHub Secret:
 
-## Privacy
+```yaml
+- uses: wsystemdev/einvoice-validate-action@v2
+  with:
+    files: invoices/**/*.pdf
+    image: ghcr.io/wsystemdev/einvoice-validator-pro:0.1
+    license-key: ${{ secrets.WSYSTEM_VALIDATOR_KEY }}
+```
 
-Each file is sent over HTTPS to the W System API for checking; see the [privacy notice](https://wsystem.dev/privacy). Use test invoices with dummy parties in CI where you can.
+## Hosted API fallback (`engine: api`)
 
-## About
+On runners without Docker (such as macOS or Windows) or if you used `@v1`, you can opt into `engine: api`, which sends files over HTTPS to `https://api.wsystem.dev`. In default `engine: local` mode, nothing is sent over the network.
 
-Made by [W System](https://wsystem.dev), which runs the validation API behind this action ([API docs](https://wsystem.dev/docs), [browser validator](https://wsystem.dev/e-invoice-validator)). The action itself is MIT-licensed and uses only the Python standard library already on GitHub runners. Questions: hello@wsystem.dev.
+## What is checked & disclaimer
+
+- Checked: XML well-formedness, UBL 2.1 / UN/CEFACT CII D16B XSD schemas, CEN EN 16931 Schematron rules, and KoSIT XRechnung 3.0 rules (including XML extracted from ZUGFeRD / Factur-X PDFs).
+- Not checked in the free rule pack: Peppol BIS Billing 3.0 specific rules (`PEPPOL-EN16931-*`).
+- **Disclaimer:** This is a technical check against the official rule sets. A technically valid file is not tax or legal advice.
+
+## Licence
+
+- This GitHub Action is licensed under the **Apache License 2.0** (see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)).
+- In `engine: local` mode, the validator container ships third-party rule artefacts under their own licences (CEN/TC 434 EN 16931 under EUPL-1.2 unmodified; KoSIT XRechnung configuration under Apache-2.0; Saxon-HE under MPL-2.0).
+
+Made by [W System](https://wsystem.dev). Questions: `hello@wsystem.dev`.

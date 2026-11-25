@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+reports/
+wsystem-einvoice-report.json
+wsystem-einvoice-report.sarif

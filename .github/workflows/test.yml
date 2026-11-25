@@ -1,24 +1,120 @@
 name: test
-on: [push, pull_request, workflow_dispatch]
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      require_container:
+        description: "Fail if ghcr.io/wsystemdev/einvoice-validator:0.1 is not yet published"
+        required: false
+        default: "false"
+
 jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: python3 -m unittest discover -s tests -v
-  live:
+
+  self-test:
+    needs: unit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: valid example passes
+
+      - name: Check offline validator image availability
+        id: img
+        run: |
+          if docker manifest inspect ghcr.io/wsystemdev/einvoice-validator:0.1 >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            if [[ "${{ github.ref_type }}" == "tag" || "${{ inputs.require_container }}" == "true" ]]; then
+              echo "::error::ghcr.io/wsystemdev/einvoice-validator:0.1 is required for tag/strict self-test but is not publicly available."
+              exit 1
+            fi
+            echo "::notice::ghcr.io/wsystemdev/einvoice-validator:0.1 is not publicly available on GHCR yet; skipping live container self-test until the validator image is published."
+          fi
+
+      - name: Valid fixtures pass offline (UBL, CII, XRechnung, Factur-X PDF)
+        if: steps.img.outputs.available == 'true'
+        id: valid
         uses: ./
         with:
-          files: examples/*.xml
-      - name: broken example fails
-        id: broken
+          files: |
+            tests/fixtures/valid/*.xml
+            tests/fixtures/valid/*.pdf
+          rules: auto
+          fail-on: error
+          json-report: reports/valid.json
+          sarif-report: reports/valid.sarif
+
+      - name: Verify valid outputs and SARIF/JSON reports
+        if: steps.img.outputs.available == 'true'
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          assert "${{ steps.valid.outputs.checked }}" == "5"
+          assert "${{ steps.valid.outputs.failed }}" == "0"
+          assert "${{ steps.valid.outputs.valid }}" == "true"
+          j = json.loads(pathlib.Path("reports/valid.json").read_text())
+          s = json.loads(pathlib.Path("reports/valid.sarif").read_text())
+          assert j["offline"] is True and j["checked"] == 5 and j["failed"] == 0
+          assert s["version"] == "2.1.0"
+          PY
+
+      - name: Valid fixture with warning passes under fail-on=error, fails under fail-on=warning
+        if: steps.img.outputs.available == 'true'
+        id: warn_fail
         continue-on-error: true
         uses: ./
         with:
-          files: tests/broken-totals.xml
-      - name: expect failure
-        run: test "${{ steps.broken.outcome }}" = "failure"
+          files: tests/fixtures/valid/KoSIT_01.01a-INVOICE_ubl.xml
+          fail-on: warning
+          report-format: none
+
+      - name: Expect warning failure
+        if: steps.img.outputs.available == 'true'
+        run: test "${{ steps.warn_fail.outputs.failed }}" = "1" -a "${{ steps.warn_fail.outcome }}" = "failure"
+
+      - name: Invalid fixtures fail offline (XML + Factur-X PDF + non-invoice)
+        if: steps.img.outputs.available == 'true'
+        id: invalid
+        continue-on-error: true
+        uses: ./
+        with:
+          files: |
+            tests/fixtures/invalid/*.xml
+            tests/fixtures/invalid/*.pdf
+          rules: auto
+          fail-on: error
+          json-report: reports/invalid.json
+          sarif-report: reports/invalid.sarif
+
+      - name: Verify invalid outputs and SARIF ruleIds
+        if: steps.img.outputs.available == 'true'
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          assert "${{ steps.invalid.outcome }}" == "failure"
+          assert "${{ steps.invalid.outputs.checked }}" == "4"
+          assert "${{ steps.invalid.outputs.failed }}" == "4"
+          s = json.loads(pathlib.Path("reports/invalid.sarif").read_text())
+          rule_ids = {r["ruleId"] for r in s["runs"][0]["results"]}
+          for expected in ("BR-CO-16", "BR-DE-15", "BR-16", "INPUT_ERROR"):
+              assert expected in rule_ids, (expected, rule_ids)
+          PY
+
+      - name: fail-on=none exits 0 even on invalid fixtures
+        if: steps.img.outputs.available == 'true'
+        id: warn_only
+        uses: ./
+        with:
+          files: tests/fixtures/invalid/ubl-xrechnung-BR-CO-16-totals.xml
+          fail-on: none
+          report-format: none
+
+      - name: Verify fail-on=none output
+        if: steps.img.outputs.available == 'true'
+        run: test "${{ steps.warn_only.outputs.failed }}" = "1" -a "${{ steps.warn_only.outputs.valid }}" = "true"

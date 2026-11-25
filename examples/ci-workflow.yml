@@ -1,0 +1,46 @@
+name: Validate e-invoices
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate-einvoices:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Generate your test invoices here, for example:
+      # - run: make generate-invoices
+
+      - name: Validate e-invoices offline
+        id: einvoice
+        uses: wsystemdev/einvoice-validate-action@v2
+        with:
+          files: |
+            invoices/**/*.xml
+            invoices/**/*.pdf
+          rules: auto
+          fail-on: error
+          report-format: both
+          sarif-report: reports/einvoice.sarif
+          json-report: reports/einvoice.json
+          # Optional commercial validator image + offline licence key:
+          # image: ghcr.io/wsystemdev/einvoice-validator-pro:0.1
+          # license-key: ${{ secrets.WSYSTEM_VALIDATOR_KEY }}
+
+      - name: Upload SARIF report to GitHub Code Scanning
+        if: always() && steps.einvoice.outputs.sarif-report != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.einvoice.outputs.sarif-report }}
+
+      - name: Upload JSON validation report
+        if: always() && steps.einvoice.outputs.json-report != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: einvoice-validation-report
+          path: ${{ steps.einvoice.outputs.json-report }}
