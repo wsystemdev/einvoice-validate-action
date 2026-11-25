@@ -38,13 +38,13 @@ inputs:
     required: false
     default: ""
   engine:
-    description: "Validation engine: local (offline Docker container with --network none, default) or api (hosted W System API)."
+    description: "Validation engine: local (offline Docker container with --network none; falls back to pinned pip package if Docker/GHCR unavailable), docker (strict Docker only), pip (offline Python package), or api (hosted W System API)."
     required: false
     default: "local"
   image:
-    description: "Container image used when engine is 'local'."
+    description: "Pinned container image used when engine is 'local' or 'docker'."
     required: false
-    default: "ghcr.io/wsystemdev/einvoice-validator:0.1"
+    default: "ghcr.io/wsystemdev/einvoice-validator:0.1.0-beta.2"
   report-format:
     description: "Report file(s) to write: both | sarif | json | none."
     required: false

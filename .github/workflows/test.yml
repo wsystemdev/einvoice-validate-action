@@ -4,11 +4,6 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-    inputs:
-      require_container:
-        description: "Fail if ghcr.io/wsystemdev/einvoice-validator:0.1 is not yet published"
-        required: false
-        default: "false"
 
 jobs:
   unit:
@@ -23,22 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check offline validator image availability
-        id: img
-        run: |
-          if docker manifest inspect ghcr.io/wsystemdev/einvoice-validator:0.1 >/dev/null 2>&1; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            if [[ "${{ github.ref_type }}" == "tag" || "${{ inputs.require_container }}" == "true" ]]; then
-              echo "::error::ghcr.io/wsystemdev/einvoice-validator:0.1 is required for tag/strict self-test but is not publicly available."
-              exit 1
-            fi
-            echo "::notice::ghcr.io/wsystemdev/einvoice-validator:0.1 is not publicly available on GHCR yet; skipping live container self-test until the validator image is published."
-          fi
-
       - name: Valid fixtures pass offline (UBL, CII, XRechnung, Factur-X PDF)
-        if: steps.img.outputs.available == 'true'
         id: valid
         uses: ./
         with:
@@ -51,7 +31,6 @@ jobs:
           sarif-report: reports/valid.sarif
 
       - name: Verify valid outputs and SARIF/JSON reports
-        if: steps.img.outputs.available == 'true'
         run: |
           python3 - <<'PY'
           import json, pathlib
@@ -64,8 +43,7 @@ jobs:
           assert s["version"] == "2.1.0"
           PY
 
-      - name: Valid fixture with warning passes under fail-on=error, fails under fail-on=warning
-        if: steps.img.outputs.available == 'true'
+      - name: Valid fixture with warning fails under fail-on=warning
         id: warn_fail
         continue-on-error: true
         uses: ./
@@ -75,11 +53,9 @@ jobs:
           report-format: none
 
       - name: Expect warning failure
-        if: steps.img.outputs.available == 'true'
         run: test "${{ steps.warn_fail.outputs.failed }}" = "1" -a "${{ steps.warn_fail.outcome }}" = "failure"
 
       - name: Invalid fixtures fail offline (XML + Factur-X PDF + non-invoice)
-        if: steps.img.outputs.available == 'true'
         id: invalid
         continue-on-error: true
         uses: ./
@@ -93,7 +69,6 @@ jobs:
           sarif-report: reports/invalid.sarif
 
       - name: Verify invalid outputs and SARIF ruleIds
-        if: steps.img.outputs.available == 'true'
         run: |
           python3 - <<'PY'
           import json, pathlib
@@ -107,7 +82,6 @@ jobs:
           PY
 
       - name: fail-on=none exits 0 even on invalid fixtures
-        if: steps.img.outputs.available == 'true'
         id: warn_only
         uses: ./
         with:
@@ -116,5 +90,4 @@ jobs:
           report-format: none
 
       - name: Verify fail-on=none output
-        if: steps.img.outputs.available == 'true'
         run: test "${{ steps.warn_only.outputs.failed }}" = "1" -a "${{ steps.warn_only.outputs.valid }}" = "true"

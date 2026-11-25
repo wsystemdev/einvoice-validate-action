@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,8 +20,10 @@ import time
 import urllib.error
 import urllib.request
 
-UA = "wsystem-einvoice-validate-action/2.0"
-DEFAULT_IMAGE = "ghcr.io/wsystemdev/einvoice-validator:0.1"
+UA = "wsystem-einvoice-validate-action/0.1"
+DEFAULT_TAG = "0.1.0-beta.2"
+DEFAULT_IMAGE = f"ghcr.io/wsystemdev/einvoice-validator:{DEFAULT_TAG}"
+DEFAULT_REPO_URL = "https://github.com/wsystemdev/einvoice-validator"
 EXTS = (".xml", ".pdf")
 DISCLAIMER = (
     "Technical check against the official EN 16931 / XRechnung rule sets. "
@@ -29,7 +32,7 @@ DISCLAIMER = (
 )
 VALID_RULES = ("auto", "en16931", "xrechnung")
 VALID_FAIL_ON = ("error", "warning", "none")
-VALID_ENGINES = ("local", "api")
+VALID_ENGINES = ("local", "docker", "pip", "api")
 VALID_REPORT_FORMATS = ("both", "sarif", "json", "none")
 
 
@@ -120,6 +123,103 @@ def _normalize_result(r: dict, display_file: str) -> dict:
     return item
 
 
+def _git_ref_for_image(image: str) -> str:
+    tag = image.rsplit(":", 1)[-1] if ":" in image.rsplit("/", 1)[-1] else DEFAULT_TAG
+    if tag in ("latest", "0", "0.1"):
+        return f"v{DEFAULT_TAG}"
+    return tag if tag.startswith("v") else f"v{tag}"
+
+
+def _is_free_validator_image(image: str) -> bool:
+    base = image.rsplit(":", 1)[0] if ":" in image.rsplit("/", 1)[-1] else image
+    return base == "ghcr.io/wsystemdev/einvoice-validator"
+
+
+def _ensure_pip_wsv(git_ref: str, runner=subprocess.run) -> tuple[list[str], dict[str, str]]:
+    cache_root = pathlib.Path(env("RUNNER_TEMP") or tempfile.gettempdir()) / f"wsv-offline-{git_ref}"
+    venv_dir = cache_root / "venv"
+    rules_dir = cache_root / "rules"
+    py_exe = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not py_exe.is_file():
+        cache_root.mkdir(parents=True, exist_ok=True)
+        p_venv = runner([sys.executable, "-m", "venv", str(venv_dir)], capture_output=True, text=True)
+        if p_venv.returncode != 0:
+            raise RuntimeError(f"Failed to create venv for offline validator: {(p_venv.stderr or p_venv.stdout).strip()}")
+        pkg = f"git+{DEFAULT_REPO_URL}@{git_ref}"
+        p_pip = runner([str(py_exe), "-m", "pip", "install", "-q", pkg], capture_output=True, text=True)
+        if p_pip.returncode != 0:
+            shutil.rmtree(venv_dir, ignore_errors=True)
+            raise RuntimeError(f"Failed to install {pkg}: {(p_pip.stderr or p_pip.stdout).strip()}")
+
+    if not (rules_dir / "2026-08-31" / ".ok").is_file():
+        p_rules = runner(
+            [str(py_exe), "-m", "wsystem_einvoice", "fetch-rules", str(rules_dir)],
+            capture_output=True,
+            text=True,
+        )
+        if p_rules.returncode != 0:
+            raise RuntimeError(f"Failed to fetch pinned rule pack: {(p_rules.stderr or p_rules.stdout).strip()}")
+
+    return [str(py_exe), "-m", "wsystem_einvoice"], {"WSV_RULES_DIR": str(rules_dir)}
+
+
+def _run_cli_batches(
+    cmd_prefix: list[str],
+    batches: list[list[str]],
+    workspace: str,
+    rules: str,
+    license_key: str,
+    rule_pack: str,
+    extra_env: dict[str, str] | None,
+    runner,
+) -> dict:
+    all_files: list[dict] = []
+    meta_validator: dict = {"name": "W System e-invoice validator", "edition": "free", "offline": True}
+    meta_pack = rule_pack or ""
+    meta_disclaimer = DISCLAIMER
+    proc_env = os.environ.copy()
+    if extra_env:
+        proc_env.update(extra_env)
+    if license_key:
+        proc_env["WSV_LICENSE_KEY"] = license_key
+
+    for batch in batches:
+        cmd = list(cmd_prefix) + ["validate", "--rules", rules, "--format", "json"]
+        if rule_pack:
+            cmd += ["--pack", rule_pack]
+        cmd += ["--"] + batch
+        proc = runner(cmd, cwd=workspace, env=proc_env, capture_output=True, text=True)
+        if proc.returncode not in (0, 1):
+            err_msg = redact((proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip(), license_key)
+            raise RuntimeError(f"Offline validator failed (exit {proc.returncode}): {err_msg}")
+        try:
+            payload = json.loads(proc.stdout)
+        except ValueError as e:
+            err_msg = redact((proc.stderr or proc.stdout or str(e)).strip(), license_key)
+            raise RuntimeError(f"Offline validator returned invalid JSON: {err_msg}") from e
+
+        if isinstance(payload.get("validator"), dict):
+            meta_validator = dict(payload["validator"])
+            meta_validator.setdefault("offline", True)
+        if payload.get("rule_pack"):
+            meta_pack = str(payload["rule_pack"])
+        if payload.get("disclaimer"):
+            meta_disclaimer = str(payload["disclaimer"])
+
+        raw_files = payload.get("files") or []
+        for idx, item in enumerate(raw_files):
+            fallback_name = batch[idx] if idx < len(batch) else "invoice"
+            fname = item.get("file") or fallback_name
+            all_files.append(_normalize_result(item, fname))
+
+    return {
+        "validator": meta_validator,
+        "rule_pack": meta_pack,
+        "disclaimer": meta_disclaimer,
+        "files": all_files,
+    }
+
+
 def run_local(
     rel_files: list[str],
     workspace: str,
@@ -127,58 +227,71 @@ def run_local(
     image: str,
     license_key: str,
     rule_pack: str,
+    engine_mode: str = "local",
     runner=subprocess.run,
+    out=sys.stdout,
 ) -> dict:
     wsv_bin = env("WSV_BIN")
+    batch_size = 200
+    batches = [rel_files[i : i + batch_size] for i in range(0, len(rel_files), batch_size)]
+
+    if wsv_bin:
+        return _run_cli_batches(
+            shlex.split(wsv_bin), batches, workspace, rules, license_key, rule_pack, None, runner
+        )
+
+    if engine_mode == "pip":
+        ref = _git_ref_for_image(image) if _is_free_validator_image(image) else f"v{DEFAULT_TAG}"
+        cmd_prefix, extra_env = _ensure_pip_wsv(ref, runner=runner)
+        return _run_cli_batches(cmd_prefix, batches, workspace, rules, license_key, rule_pack, extra_env, runner)
+
     all_files: list[dict] = []
     meta_validator: dict = {"name": "W System e-invoice validator", "edition": "free", "offline": True}
     meta_pack = rule_pack or ""
     meta_disclaimer = DISCLAIMER
 
-    batch_size = 200
-    batches = [rel_files[i : i + batch_size] for i in range(0, len(rel_files), batch_size)]
-
     for batch in batches:
         env_file_path: str | None = None
         try:
-            if wsv_bin:
-                cmd = shlex.split(wsv_bin) + [
-                    "validate",
-                    "--rules",
-                    rules,
-                    "--format",
-                    "json",
-                ]
-                if rule_pack:
-                    cmd += ["--pack", rule_pack]
-                cmd += ["--"] + batch
-                proc_env = os.environ.copy()
-                if license_key:
-                    proc_env["WSV_LICENSE_KEY"] = license_key
-                proc = runner(cmd, cwd=workspace, env=proc_env, capture_output=True, text=True)
-            else:
-                cmd = [
-                    "docker",
-                    "run",
-                    "--rm",
-                    "--network",
-                    "none",
-                    "-v",
-                    f"{pathlib.Path(workspace).resolve()}:/work:ro",
-                    "-w",
-                    "/work",
-                ]
-                if license_key:
-                    fd, env_file_path = tempfile.mkstemp(prefix="wsv-env-", text=True)
-                    os.chmod(env_file_path, 0o600)
-                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                        fh.write(f"WSV_LICENSE_KEY={license_key}\n")
-                    cmd += ["--env-file", env_file_path]
-                cmd += [image, "validate", "--rules", rules, "--format", "json"]
-                if rule_pack:
-                    cmd += ["--pack", rule_pack]
-                cmd += ["--"] + batch
+            cmd = [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+            ]
+            if hasattr(os, "getuid") and hasattr(os, "getgid"):
+                cmd += ["--user", f"{os.getuid()}:{os.getgid()}"]
+            cmd += [
+                "-v",
+                f"{pathlib.Path(workspace).resolve()}:/work:ro",
+                "-w",
+                "/work",
+            ]
+            if license_key:
+                fd, env_file_path = tempfile.mkstemp(prefix="wsv-env-", text=True)
+                os.chmod(env_file_path, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(f"WSV_LICENSE_KEY={license_key}\n")
+                cmd += ["--env-file", env_file_path]
+            cmd += [image, "validate", "--rules", rules, "--format", "json"]
+            if rule_pack:
+                cmd += ["--pack", rule_pack]
+            cmd += ["--"] + batch
+
+            try:
                 proc = runner(cmd, cwd=workspace, capture_output=True, text=True)
+            except FileNotFoundError as e:
+                if engine_mode == "local" and _is_free_validator_image(image):
+                    print(
+                        "::notice::Docker CLI not found; falling back to pinned offline Python validator package.",
+                        file=out,
+                    )
+                    cmd_prefix, extra_env = _ensure_pip_wsv(_git_ref_for_image(image), runner=runner)
+                    return _run_cli_batches(
+                        cmd_prefix, batches, workspace, rules, license_key, rule_pack, extra_env, runner
+                    )
+                raise RuntimeError(f"Docker CLI not available: {e}") from e
         finally:
             if env_file_path and os.path.exists(env_file_path):
                 try:
@@ -187,7 +300,33 @@ def run_local(
                     pass
 
         if proc.returncode not in (0, 1):
-            err_msg = redact((proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip(), license_key)
+            raw_err = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+            low = raw_err.lower()
+            can_fallback = (
+                engine_mode == "local"
+                and _is_free_validator_image(image)
+                and any(
+                    tok in low
+                    for tok in (
+                        "unauthorized",
+                        "denied",
+                        "manifest unknown",
+                        "not found",
+                        "cannot connect to the docker daemon",
+                        "permission denied",
+                    )
+                )
+            )
+            if can_fallback:
+                print(
+                    f"::notice::Container image {image} not pullable/available locally; falling back to pinned offline Python validator ({_git_ref_for_image(image)}).",
+                    file=out,
+                )
+                cmd_prefix, extra_env = _ensure_pip_wsv(_git_ref_for_image(image), runner=runner)
+                return _run_cli_batches(
+                    cmd_prefix, batches, workspace, rules, license_key, rule_pack, extra_env, runner
+                )
+            err_msg = redact(raw_err, license_key)
             raise RuntimeError(f"Offline validator failed (exit {proc.returncode}): {err_msg}")
 
         try:
@@ -345,7 +484,7 @@ def build_summary_md(
         "warnings": "⚠️ warnings",
         "not checked": "❌ not checked",
     }
-    mode_label = "offline" if engine_mode == "local" else "API"
+    mode_label = "API" if engine_mode == "api" else "offline"
     pack_note = f" Rule pack `{md_escape(rule_pack)}`." if rule_pack else ""
     fail_note = " (`fail-on: none`)" if fail_on == "none" else ""
     rows = [
@@ -506,10 +645,10 @@ def run(
             print(f"::error title=invalid input::Invalid '{label}' value '{val}'; expected one of {', '.join(allowed)}.", file=out)
             return 2, []
 
-    if license_key and engine == "local" and not env("WSV_BIN") and "einvoice-validator-pro" not in image:
+    if license_key and engine in ("local", "docker") and not env("WSV_BIN") and "einvoice-validator-pro" not in image:
         print(
             "::notice::license-key is set; set 'image' to the commercial validator image "
-            "(for example ghcr.io/wsystemdev/einvoice-validator-pro:0.1) to enable commercial rule packs.",
+            "(for example ghcr.io/wsystemdev/einvoice-validator-pro:0.1.0-beta.1) to enable commercial rule packs.",
             file=out,
         )
 
@@ -529,7 +668,7 @@ def run(
                 json_report_path,
                 json.dumps(
                     {
-                        "validator": {**empty_meta, "offline": engine == "local"},
+                        "validator": {**empty_meta, "offline": engine != "api"},
                         "rule_pack": "",
                         "checked": 0,
                         "failed": 0,
@@ -549,9 +688,9 @@ def run(
         _write_outputs(env("GITHUB_OUTPUT"), 0, 0, True, written_json, written_sarif, "")
         return 0, []
 
-    if engine == "local":
+    if engine in ("local", "docker", "pip"):
         try:
-            allow_outside = bool(env("WSV_BIN"))
+            allow_outside = bool(env("WSV_BIN")) or engine == "pip"
             rel_files = to_workspace_rel(files, workspace, allow_outside=allow_outside)
             raw = run_local(
                 rel_files,
@@ -560,7 +699,9 @@ def run(
                 image=image,
                 license_key=license_key,
                 rule_pack=rule_pack,
+                engine_mode=engine,
                 runner=runner,
+                out=out,
             )
         except (ValueError, RuntimeError) as e:
             print(f"::error title=validator failed::{esc(redact(str(e), license_key, api_key))}", file=out)
@@ -596,7 +737,7 @@ def run(
             "checked": len(results),
             "failed": failed,
             "fail_on": fail_on,
-            "offline": engine == "local",
+            "offline": engine != "api",
             "disclaimer": raw.get("disclaimer") or DISCLAIMER,
             "files": results,
         }
@@ -618,7 +759,7 @@ def run(
         rule_pack=rule_pack_used,
     )
 
-    print(f"Validated {len(results)} file(s), {failed} failed ({'offline' if engine == 'local' else 'API'}).", file=out)
+    print(f"Validated {len(results)} file(s), {failed} failed ({'API' if engine == 'api' else 'offline'}).", file=out)
     return (1 if step_failed else 0), results
 
 

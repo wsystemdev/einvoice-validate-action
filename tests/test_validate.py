@@ -3,7 +3,6 @@ import json
 import os
 import pathlib
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -75,9 +74,11 @@ class TestValidateAction(unittest.TestCase):
                 "GITHUB_OUTPUT",
                 "GITHUB_WORKSPACE",
                 "WSV_BIN",
+                "RUNNER_TEMP",
             ):
                 os.environ.pop(k, None)
         os.environ["GITHUB_WORKSPACE"] = self.d
+        os.environ["RUNNER_TEMP"] = self.d
         os.environ["INPUT_FILES"] = "invoices/*.xml"
 
     def tearDown(self):
@@ -120,8 +121,9 @@ class TestValidateAction(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         cmd = seen[0]
         self.assertEqual(cmd[:5], ["docker", "run", "--rm", "--network", "none"])
+        self.assertIn("--user", cmd)
         self.assertIn(f"{pathlib.Path(self.d).resolve()}:/work:ro", cmd)
-        self.assertIn("ghcr.io/wsystemdev/einvoice-validator:0.1", cmd)
+        self.assertIn("ghcr.io/wsystemdev/einvoice-validator:0.1.0-beta.2", cmd)
         self.assertIn("invoices/a.xml", cmd)
 
         rep_json = json.loads((pathlib.Path(self.d) / "wsystem-einvoice-report.json").read_text())
@@ -251,7 +253,7 @@ class TestValidateAction(unittest.TestCase):
     def test_license_key_env_file_not_leaked_and_cleaned(self):
         secret = "WSV1.eyJwbGFuIjoidGVhbSJ9.TOP_SECRET_SIG_XYZ"
         os.environ["INPUT_LICENSE_KEY"] = secret
-        os.environ["INPUT_IMAGE"] = "ghcr.io/wsystemdev/einvoice-validator-pro:0.1"
+        os.environ["INPUT_IMAGE"] = "ghcr.io/wsystemdev/einvoice-validator-pro:0.1.0-beta.1"
         os.environ["INPUT_RULE_PACK"] = "2026.11.1"
         seen, snaps = [], []
         payload = {
@@ -272,6 +274,41 @@ class TestValidateAction(unittest.TestCase):
         self.assertNotIn(secret, (pathlib.Path(self.d) / "wsystem-einvoice-report.json").read_text())
         self.assertNotIn(secret, (pathlib.Path(self.d) / "wsystem-einvoice-report.sarif").read_text())
 
+    def test_local_falls_back_to_pip_when_ghcr_unauthorized_while_docker_mode_strict(self):
+        # Pre-populate cached venv/rules layout to simulate pip fallback cleanly
+        cache = pathlib.Path(self.d) / "wsv-offline-v0.1.0-beta.2"
+        py_bin = cache / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        py_bin.parent.mkdir(parents=True)
+        py_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        (cache / "rules" / "2026-08-31").mkdir(parents=True)
+        (cache / "rules" / "2026-08-31" / ".ok").write_text("ok", encoding="utf-8")
+
+        calls = []
+
+        def fallback_runner(cmd, cwd=None, env=None, capture_output=True, text=True):
+            calls.append((cmd, env))
+            if cmd[0] == "docker":
+                return MockProc(returncode=125, stdout="", stderr="Error response from daemon: unauthorized")
+            return MockProc(
+                returncode=0,
+                stdout=json.dumps({"rule_pack": "2026.11.1", "files": [{"file": "invoices/a.xml", "valid": True, "errors": [], "warnings": []}]}),
+            )
+
+        out = io.StringIO()
+        code, _ = v.run(runner=fallback_runner, out=out)
+        self.assertEqual(code, 0)
+        self.assertIn("::notice::Container image", out.getvalue())
+        self.assertEqual(calls[0][0][0], "docker")
+        self.assertEqual(calls[1][0][0], str(py_bin))
+        self.assertEqual(calls[1][1]["WSV_RULES_DIR"], str(cache / "rules"))
+
+        # Strict engine=docker does not fall back
+        os.environ["INPUT_ENGINE"] = "docker"
+        out2 = io.StringIO()
+        code2, _ = v.run(runner=fallback_runner, out=out2)
+        self.assertEqual(code2, 1)
+        self.assertIn("unauthorized", out2.getvalue())
+
     def test_input_error_and_docker_failure(self):
         payload = {
             "rule_pack": "2026.11.1",
@@ -283,6 +320,8 @@ class TestValidateAction(unittest.TestCase):
         self.assertIn("title=not an e-invoice", out.getvalue())
         sarif = json.loads((pathlib.Path(self.d) / "wsystem-einvoice-report.sarif").read_text())
         self.assertEqual(sarif["runs"][0]["results"][0]["ruleId"], "INPUT_ERROR")
+
+        os.environ["INPUT_ENGINE"] = "docker"
 
         def fail_docker(*a, **k):
             return MockProc(returncode=125, stdout="", stderr="pull access denied")

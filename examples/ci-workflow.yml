@@ -18,7 +18,7 @@ jobs:
 
       - name: Validate e-invoices offline
         id: einvoice
-        uses: wsystemdev/einvoice-validate-action@v2
+        uses: wsystemdev/einvoice-validate-action@v0
         with:
           files: |
             invoices/**/*.xml
@@ -29,7 +29,7 @@ jobs:
           sarif-report: reports/einvoice.sarif
           json-report: reports/einvoice.json
           # Optional commercial validator image + offline licence key:
-          # image: ghcr.io/wsystemdev/einvoice-validator-pro:0.1
+          # image: ghcr.io/wsystemdev/einvoice-validator-pro:0.1.0-beta.1
           # license-key: ${{ secrets.WSYSTEM_VALIDATOR_KEY }}
 
       - name: Upload SARIF report to GitHub Code Scanning
